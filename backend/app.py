@@ -6,6 +6,16 @@ Flask-SocketIO (which falls back to polling if WebSocket is unavailable).
 """
 from __future__ import annotations
 
+# Enable WebSocket transport when eventlet is available. This must be done
+# before other networking libraries are imported so that monkey-patching is
+# effective. If eventlet is not installed we silently continue; the server
+# will then fall back to long-polling transports.
+try:
+    import eventlet  # type: ignore
+    eventlet.monkey_patch()
+except ImportError:
+    eventlet = None
+
 from threading import Lock
 from typing import Dict, Any
 
@@ -156,5 +166,25 @@ def run_aco():
     return jsonify({"status": "started", "run_id": run_id})
 
 
+# When this file is executed directly (e.g. `python -m backend.app`) we
+# default to *production* settings so that the server does **not** spawn the
+# Werkzeug reloader. The reloader is useful in a development workflow where
+# the backend is started manually, but it interferes with the desktop
+# wrappers (run_aco_desktop.py / run_rrt_desktop.py) because they launch the
+# backend as a subprocess and immediately attempt to connect with a Pygame
+# visualiser. When the reloader kicks in it briefly tears down the HTTP
+# server, causing the first connection attempt to fail with a cryptic
+# "One or more namespaces failed to connect" error.
+#
+# You can still opt-in to debug/reload by setting the environment variable
+# BACKEND_DEBUG=1 before launching the module.
+
 if __name__ == "__main__":
-    socketio.run(app, host="0.0.0.0", port=5000, debug=True) 
+    import os
+
+    debug_flag = os.environ.get("BACKEND_DEBUG", "0") in {"1", "true", "True"}
+
+    # *Without* the reloader (`debug=False`) the server stays alive for the
+    # entire lifetime of the desktop application, and Socket.IO clients can
+    # connect reliably.
+    socketio.run(app, host="0.0.0.0", port=5000, debug=debug_flag) 
