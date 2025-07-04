@@ -15,6 +15,7 @@ from flask_cors import CORS
 from shapely.geometry import Polygon
 
 from algorithms.rrt_star import RRTStar
+from algorithms.aco_task_allocation import ACOTaskAllocation
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = "change-me"  # in production override via env
@@ -94,6 +95,65 @@ def run_rrtstar():
 def list_runs():
     with _planners_lock:
         return jsonify(list(_planners.keys()))
+
+
+# --------------------------------------------------------
+# ACO Task Allocation Endpoint
+# --------------------------------------------------------
+
+
+@app.route("/api/run/aco", methods=["POST"])
+def run_aco():
+    data = request.get_json(force=True)
+
+    tasks: list = data["tasks"]  # list of {"id":int, "x":, "y":}
+    deps: dict = data.get("dependencies", {})  # {task_id: [prereq_id,...]}
+    robots: list = data["robots"]  # list of {"id":int, "x":, "y":}
+    obstacles: list = data.get("obstacles", [])  # list of rects
+    map_size = tuple(data.get("map_size", [1000, 800]))
+
+    task_positions = [(t["x"], t["y"]) for t in tasks]
+    dependencies = {int(k): v for k, v in deps.items()}
+    robot_starts = [(r["x"], r["y"]) for r in robots]
+
+    aco = ACOTaskAllocation(
+        task_positions=task_positions,
+        dependencies=dependencies,
+        robot_starts=robot_starts,
+        n_ants=data.get("n_ants", 30),
+        n_iter=data.get("n_iter", 150),
+        alpha=data.get("alpha", 1.0),
+        beta=data.get("beta", 2.0),
+        rho=data.get("rho", 0.1),
+        q=data.get("q", 50.0),
+        seed=data.get("seed"),
+        obstacles=obstacles,
+        map_size=map_size,
+    )
+
+    run_id = data.get("run_id", f"aco_{id(aco)}")
+
+    def _background_task():
+        history = []
+        for snap in aco.run(snapshot_interval=data.get("snapshot_interval", 10)):
+            history.append(snap)
+
+        finish_times = aco.compute_finish_times(aco.best_solution)
+
+        socketio.emit(
+            "aco_result",
+            {
+                "run_id": run_id,
+                "history": history,
+                "best_cost": aco.best_cost,
+                "allocation": {str(k): v for k, v in aco.best_solution.items()},
+                "finish_times": finish_times,
+            },
+        )
+
+    socketio.start_background_task(_background_task)
+
+    return jsonify({"status": "started", "run_id": run_id})
 
 
 if __name__ == "__main__":
