@@ -14,8 +14,7 @@ from flask_socketio import SocketIO
 from flask_cors import CORS
 from shapely.geometry import Polygon
 
-from .algorithms.rrt_star import RRTStar
-from .algorithms.mapf import build_grid_from_rects, CBSSolver
+from algorithms.rrt_star import RRTStar
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = "change-me"  # in production override via env
@@ -60,16 +59,28 @@ def run_rrtstar():
         step_size=data.get("step_size", 20.0),
         goal_radius=data.get("goal_radius", 25.0),
         max_iter=data.get("max_iter", 2000),
-        snapshot_interval=data.get("snapshot_interval", 15),
+        snapshot_interval=data.get("snapshot_interval", 1),
+        min_sample_dist=10,
         seed=data.get("seed"),
     )
 
     run_id = data.get("run_id", f"rrt_{id(planner)}")
 
     def _background_task():
-        for snap in planner.run_iter():
-            socketio.emit("rrt_snapshot", {"run_id": run_id, **snap})
-        socketio.emit("rrt_done", {"run_id": run_id, "path": planner.best_path})
+        history = []
+        iter_found = None
+        for delta in planner.run_iter():
+            history.append(delta)
+            if delta.get("goal_reached") and iter_found is None:
+                iter_found = delta["iteration"]
+                # stop planning once first valid path found
+                break
+
+        # Emit entire history at once (deltas only)
+        socketio.emit("rrt_history", {"run_id": run_id, "history": history})
+
+        final_path = planner.best_path
+        socketio.emit("rrt_done", {"run_id": run_id, "path": final_path, "iterations": iter_found})
 
     socketio.start_background_task(_background_task)
 
@@ -83,43 +94,6 @@ def run_rrtstar():
 def list_runs():
     with _planners_lock:
         return jsonify(list(_planners.keys()))
-
-
-# ------------------------------------------------------------------
-# MAPF (CBS) endpoint
-# ------------------------------------------------------------------
-
-
-@app.route("/api/run/mapf", methods=["POST"])
-def run_mapf():
-    data = request.get_json(force=True)
-
-    bounds = tuple(map(tuple, data["bounds"]))
-    obstacles_rects = data.get("obstacles", [])
-    cell_size = data.get("cell_size", 20)
-
-    world = build_grid_from_rects(bounds, obstacles_rects, cell_size)
-
-    starts = [tuple(a["start"]) for a in data["agents"]]
-    goals = [tuple(a["goal"]) for a in data["agents"]]
-
-    solver = CBSSolver(world, starts, goals)
-    run_id = data.get("run_id", f"mapf_{id(solver)}")
-
-    def _background_task():
-        final_paths = None
-        for snap in solver.run_iter():
-            socketio.emit("mapf_snapshot", {"run_id": run_id, **snap})
-            if snap.get("conflict") is None:
-                final_paths = snap["paths"]
-        socketio.emit("mapf_done", {"run_id": run_id, "paths": final_paths})
-
-    socketio.start_background_task(_background_task)
-
-    with _planners_lock:
-        _planners[run_id] = solver
-
-    return jsonify({"status": "started", "run_id": run_id})
 
 
 if __name__ == "__main__":
